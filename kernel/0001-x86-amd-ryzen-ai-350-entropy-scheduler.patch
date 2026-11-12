@@ -1,0 +1,94 @@
+From: Aiden <aiden@fedora>
+Subject: [PATCH] x86/amd: Enable asymmetric cpu_scale capacity and ITMT ranking on Ryzen AI 300 (Krackan/Strix)
+
+On AMD Family 26h hybrid processors (such as the Ryzen AI 7 350 "Krackan Point"
+with 4x Zen 5 + 4x Zen 5c cores interleaved inside a single CCX), MSR_AMD_CPPC_CAP1
+reports uniform capability while the asymmetric per-core performance rankings
+(208, 202, 196 for Zen 5 vs 135 for Zen 5c) are exposed via ACPI CPPC and
+AMDI0104 (amd_hfi).
+
+Ensure that:
+1. amd_detect_prefcore() falls back to checking ACPI CPPC highest_perf variance
+   when MSR_AMD_CPPC_CAP1 appears uniform, preventing prefcore from being
+   erroneously disabled.
+2. Per-CPU arch_scale_cpu_capacity (cpu_scale) is scaled proportionally to each
+   core's CPPC highest_perf ranking so EEVDF and sched_ext observe the true
+   asymmetric capacity between High-Entropy Zen 5 cores (1024..965) and
+   Low-Entropy Zen 5c cores (664).
+3. Zen 5 SMT siblings (CPUs 8,10,12,14) receive higher ITMT priority than
+   Zen 5c primary cores (CPUs 1,3,5,7) so latency-sensitive high-entropy
+   workloads prefer Zen 5 SMT threads before spilling onto 3.51 GHz Zen 5c cores.
+
+Signed-off-by: Aiden <aiden@fedora>
+---
+ drivers/cpufreq/amd-pstate.c          | 29 +++++++++++++++++++++++++++--
+ drivers/platform/x86/amd/hfi/hfi.c    | 14 ++++++++++++++
+ 2 files changed, 41 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/cpufreq/amd-pstate.c b/drivers/cpufreq/amd-pstate.c
+index 4a21b901d..9f88e310c 100644
+--- a/drivers/cpufreq/amd-pstate.c
++++ b/drivers/cpufreq/amd-pstate.c
+@@ -812,11 +812,36 @@ static void amd_pstate_init_prefcore(struct amd_cpudata *cpudata)
+ {
+ 	int ret, prio;
+ 	u32 highest_perf;
++	unsigned long capacity;
++	u32 max_cppc_perf = 208;
+ 
+ 	ret = amd_get_highest_perf(cpudata->cpu, &highest_perf);
+ 	if (ret)
+ 		return;
+ 
++	/*
++	 * On Family 26h hybrid Zen 5 / Zen 5c (e.g. Ryzen AI 7 350),
++	 * prefer ACPI CPPC highest_perf if MSR_AMD_CPPC_CAP1 is uniform
++	 * and scale arch cpu_capacity + ITMT priority accordingly.
++	 */
++	if (boot_cpu_data.x86 == 0x1a && cpudata->cppc_cap1_perf == highest_perf) {
++		struct cppc_perf_caps cppc_perf;
++		if (!cppc_get_perf_caps(cpudata->cpu, &cppc_perf) &&
++		    cppc_perf.highest_perf > 0)
++			highest_perf = cppc_perf.highest_perf;
++	}
++
+ 	cpudata->hw_prefcore = true;
+ 	prio = (int)highest_perf;
++	if (cpudata->cpu >= 8 && (cpudata->cpu & 1) == 0 && prio > 160) {
++		/* Keep Zen 5 SMT siblings ranked above Zen 5c (135) */
++		prio = 172;
++	}
++
++	capacity = clamp_val((highest_perf * SCHED_CAPACITY_SCALE) / max_cppc_perf,
++			     512UL, SCHED_CAPACITY_SCALE);
++	per_cpu(cpu_scale, cpudata->cpu) = capacity;
++
+ 	sched_set_itmt_core_prio(prio, cpudata->cpu);
++	sched_set_itmt_support();
+ }
+diff --git a/drivers/platform/x86/amd/hfi/hfi.c b/drivers/platform/x86/amd/hfi/hfi.c
+index 71c0a3b2e..d84e9012a 100644
+--- a/drivers/platform/x86/amd/hfi/hfi.c
++++ b/drivers/platform/x86/amd/hfi/hfi.c
+@@ -264,6 +264,20 @@ static void amd_hfi_sched_itmt_work(struct work_struct *work)
+ 	for_each_online_cpu(cpu) {
+ 		struct amd_hfi_cpuinfo *hfi_info = per_cpu_ptr(&amd_hfi_cpuinfo, cpu);
+ 		int prio = hfi_info->amd_hfi_classes[0].perf;
++		unsigned long cap;
++
++		/*
++		 * Scale per-CPU scheduler capacity from HFI Class 0 (high-entropy
++		 * single-thread performance class) so EEVDF & sched_ext distinguish
++		 * Zen 5 Classic cores from Zen 5c Dense cores.
++		 */
++		cap = clamp_val((prio * SCHED_CAPACITY_SCALE) / 208,
++				512UL, SCHED_CAPACITY_SCALE);
++		WRITE_ONCE(per_cpu(cpu_scale, cpu), cap);
++		if (cpu >= 8 && (cpu & 1) == 0 && prio > 135)
++			prio = 172;
++
+ 		sched_set_itmt_core_prio(prio, cpu);
+ 	}
+ 	sched_set_itmt_support();
+-- 
+2.47.0

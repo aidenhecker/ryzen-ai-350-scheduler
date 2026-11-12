@@ -1,0 +1,24 @@
+# Rust build artifacts
+/target/
+
+# Compiled binaries (built locally via `cargo build --release` / `make`)
+/bin/zen5
+/bin/scx_ryzen350.bpf.o
+/bin/zen5_entropy_kmod.ko
+
+# Kernel module intermediate build artifacts
+kmod/*.o
+kmod/*.ko
+kmod/*.mod
+kmod/*.mod.c
+kmod/*.mod.o
+kmod/.*.o
+kmod/.*.cmd
+kmod/Module.symvers
+kmod/modules.order
+kmod/.tmp_versions/
+
+# Temporary / IDE files
+*.swp
+*~
+.DS_Store

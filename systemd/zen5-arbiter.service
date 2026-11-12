@@ -1,0 +1,13 @@
+[Unit]
+Description=AMD Ryzen AI 7 350 Entropy-Driven Scheduler Arbiter (Easy Mode)
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=/home/aiden/Projects/ryzen-ai-350-scheduler/bin/zen5 daemon --interval 0.4
+Restart=always
+RestartSec=2
+CPUAffinity=1 3 5 7 9 11 13 15
+
+[Install]
+WantedBy=default.target

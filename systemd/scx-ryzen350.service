@@ -1,0 +1,14 @@
+[Unit]
+Description=AMD Ryzen AI 7 350 eBPF sched_ext Entropy Scheduler & Hardware EPP Tuner
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStartPre=/home/aiden/Projects/ryzen-ai-350-scheduler/bin/zen5-hw-tune apply
+ExecStart=/home/aiden/Projects/ryzen-ai-350-scheduler/bin/scx_ryzen350 --obj /home/aiden/Projects/ryzen-ai-350-scheduler/bin/scx_ryzen350.bpf.o
+ExecStopPost=/home/aiden/Projects/ryzen-ai-350-scheduler/bin/zen5-hw-tune reset
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

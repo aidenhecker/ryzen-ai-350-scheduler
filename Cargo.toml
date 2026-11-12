@@ -1,0 +1,16 @@
+[package]
+name = "zen5-scheduler"
+version = "1.0.0"
+edition = "2021"
+authors = ["Aiden"]
+description = "AMD Ryzen AI 7 350 Entropy-Driven Hybrid Scheduler Stack (Rust + eBPF sched_ext)"
+
+[[bin]]
+name = "zen5"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = false
