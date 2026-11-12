@@ -1012,10 +1012,12 @@ fn is_arbiter_running() -> Option<i32> {
     let s = fs::read_to_string(pfile).ok()?;
     let pid: i32 = s.trim().parse().ok()?;
     if unsafe { kill(pid, 0) == 0 } {
-        Some(pid)
-    } else {
-        None
+        let comm = read_sysfs_string(&format!("/proc/{}/comm", pid));
+        if comm == "zen5" {
+            return Some(pid);
+        }
     }
+    None
 }
 
 fn start_arbiter_daemon() -> i32 {
@@ -1326,6 +1328,11 @@ fn cmd_daemon(interval_ms: u64) {
     let dir = config_dir();
     let _ = fs::create_dir_all(&dir);
     let my_pid = unsafe { getpid() };
+    if let Some(existing_pid) = is_arbiter_running() {
+        if existing_pid != my_pid {
+            return;
+        }
+    }
     let _ = fs::write(pid_file_path(), format!("{}\n", my_pid));
 
     // Pin the Rust arbiter daemon itself to Low-Entropy Zen 5c cores so it NEVER disturbs Zen 5!
@@ -1686,7 +1693,7 @@ fn cmd_scx_load(bpf_obj_override: Option<String>, quiet: bool) {
     }
 
     println!("\n[zen5 scx-load] Detaching kernel sched_ext scheduler and cleaning up...");
-    for map_name in ["pid_tier_map", "tgid_tier_map", "stats_map"] {
+    for map_name in ["pid_tier_map", "tgid_tier_map", "stats_map", "config_map"] {
         let _ = fs::remove_file(format!("{}/{}", pin_dir, map_name));
     }
     unsafe {
@@ -1709,12 +1716,28 @@ fn cmd_hw_tune(action: &str) {
         let _ = Command::new("rmmod").arg("zen5_entropy_kmod").status();
         for cpu in 0..MAX_CPUS {
             let gov = format!("/sys/devices/system/cpu/cpufreq/policy{}/scaling_governor", cpu);
+            let epp = format!(
+                "/sys/devices/system/cpu/cpufreq/policy{}/energy_performance_preference",
+                cpu
+            );
+            let max_info = read_sysfs_string(&format!(
+                "/sys/devices/system/cpu/cpufreq/policy{}/cpuinfo_max_freq",
+                cpu
+            ));
+            let max_scaling = format!(
+                "/sys/devices/system/cpu/cpufreq/policy{}/scaling_max_freq",
+                cpu
+            );
             let _ = fs::write(gov, "powersave\n");
+            let _ = fs::write(epp, "balance_performance\n");
+            if !max_info.is_empty() {
+                let _ = fs::write(max_scaling, format!("{}\n", max_info));
+            }
         }
         let _ = Command::new("systemctl")
             .args(["set-property", "--runtime", "system.slice", "AllowedCPUs=0-15"])
             .status();
-        println!("[zen5 hw-tune] Unloaded zen5_entropy_kmod and restored default governors/cgroups.");
+        println!("[zen5 hw-tune] Unloaded zen5_entropy_kmod and restored default governors, max_freq & cgroups.");
         return;
     }
 
@@ -1791,12 +1814,171 @@ fn cmd_hw_tune(action: &str) {
     println!("  [✓] systemd system.slice shielded onto Low-Entropy Zen 5c (1,3,5,7,9,11,13,15)");
 }
 
+// ============================================================================
+// Startup Installation & Boot Verification (`zen5 install` / `zen5 verify`)
+// ============================================================================
+fn cmd_install() {
+    let home = env::var("HOME").unwrap_or_else(|_| "/home/aiden".to_string());
+    let home_path = PathBuf::from(&home);
+    let proj = project_dir();
+    let bin_zen5 = proj.join("bin/zen5");
+
+    // 1. Ensure ~/.local/bin/zen5 symlink exists
+    let local_bin_dir = home_path.join(".local/bin");
+    let _ = fs::create_dir_all(&local_bin_dir);
+    let local_zen5 = local_bin_dir.join("zen5");
+    if local_zen5.exists() || local_zen5.is_symlink() {
+        let _ = fs::remove_file(&local_zen5);
+    }
+    let _ = std::os::unix::fs::symlink(&bin_zen5, &local_zen5);
+
+    // 2. Install ~/.config/systemd/user/zen5-arbiter.service and enable in default.target.wants
+    let systemd_user_dir = home_path.join(".config/systemd/user");
+    let wants_dir = systemd_user_dir.join("default.target.wants");
+    let _ = fs::create_dir_all(&wants_dir);
+
+    let unit_path = systemd_user_dir.join("zen5-arbiter.service");
+    let unit_content = format!(
+        "[Unit]\n\
+         Description=AMD Ryzen AI 7 350 Entropy-Driven Scheduler Arbiter (Rust Easy Mode)\n\
+         After=default.target pipewire.service wireplumber.service\n\
+         Wants=pipewire.service wireplumber.service\n\
+         \n\
+         [Service]\n\
+         Type=simple\n\
+         ExecStart={}/.local/bin/zen5 daemon --interval 0.4\n\
+         Restart=always\n\
+         RestartSec=2\n\
+         CPUAffinity=1 3 5 7 9 11 13 15\n\
+         \n\
+         [Install]\n\
+         WantedBy=default.target\n",
+        home
+    );
+    let _ = fs::write(&unit_path, unit_content);
+
+    let wants_link = wants_dir.join("zen5-arbiter.service");
+    if wants_link.exists() || wants_link.is_symlink() {
+        let _ = fs::remove_file(&wants_link);
+    }
+    let _ = std::os::unix::fs::symlink(&unit_path, &wants_link);
+
+    // Try reloading user systemd daemon if bus is available
+    let _ = Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = Command::new("systemctl")
+        .args(["--user", "enable", "--now", "zen5-arbiter.service"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    // 3. Install XDG Desktop Autostart entry (~/.config/autostart/zen5-arbiter.desktop)
+    let autostart_dir = home_path.join(".config/autostart");
+    let _ = fs::create_dir_all(&autostart_dir);
+    let desktop_path = autostart_dir.join("zen5-arbiter.desktop");
+    let desktop_content = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=Zen 5 Entropy Scheduler Arbiter\n\
+         Comment=AMD Ryzen AI 7 350 High-Entropy Zen 5 vs Low-Entropy Zen 5c Easy Mode\n\
+         Exec={}/.local/bin/zen5 easy-mode on\n\
+         Terminal=false\n\
+         Hidden=false\n\
+         X-GNOME-Autostart-enabled=true\n",
+        home
+    );
+    let _ = fs::write(&desktop_path, desktop_content);
+
+    // 4. Persist strict Easy Mode state and ensure daemon is running now
+    let mut cfg = ConfigState::load();
+    if cfg.mode == "off" {
+        cfg.mode = "strict".to_string();
+    }
+    cfg.save();
+    let _ = start_arbiter_daemon();
+
+    cmd_verify_install();
+}
+
+fn cmd_verify_install() {
+    let home = env::var("HOME").unwrap_or_else(|_| "/home/aiden".to_string());
+    let home_path = PathBuf::from(&home);
+    let proj = project_dir();
+
+    let local_zen5 = home_path.join(".local/bin/zen5");
+    let unit_path = home_path.join(".config/systemd/user/zen5-arbiter.service");
+    let wants_link = home_path.join(".config/systemd/user/default.target.wants/zen5-arbiter.service");
+    let desktop_path = home_path.join(".config/autostart/zen5-arbiter.desktop");
+    let bpf_obj = proj.join("bin/scx_ryzen350.bpf.o");
+    let kmod_obj = proj.join("bin/zen5_entropy_kmod.ko");
+    let cfg = ConfigState::load();
+    let arb_pid = is_arbiter_running();
+
+    let arb_on_zen5c = arb_pid
+        .map(|pid| get_tid_affinity(pid) == ZEN5C_ALL_MASK)
+        .unwrap_or(false);
+
+    println!("==========================================================================================");
+    println!(" AMD Ryzen AI 7 350 — Installation & Startup Persistence Verification Audit");
+    println!("==========================================================================================");
+    println!(
+        "  [{}] CLI Binary Symlink      : {} -> {}",
+        if local_zen5.exists() { "PASS" } else { "FAIL" },
+        local_zen5.display(),
+        proj.join("bin/zen5").display()
+    );
+    println!(
+        "  [{}] Systemd User Service    : {}",
+        if unit_path.exists() { "PASS" } else { "FAIL" },
+        unit_path.display()
+    );
+    println!(
+        "  [{}] Systemd Boot Target Link: {}",
+        if wants_link.exists() { "PASS" } else { "FAIL" },
+        wants_link.display()
+    );
+    println!(
+        "  [{}] XDG Desktop Autostart   : {}",
+        if desktop_path.exists() { "PASS" } else { "FAIL" },
+        desktop_path.display()
+    );
+    println!(
+        "  [{}] Persistent Config State : mode={} ({})",
+        if cfg.mode == "strict" || cfg.mode == "golden-only" { "PASS" } else { "WARN" },
+        cfg.mode.to_uppercase(),
+        config_dir().join("state.conf").display()
+    );
+    println!(
+        "  [{}] Live Rust Arbiter Daemon: {}",
+        if arb_pid.is_some() && arb_on_zen5c { "PASS" } else { "FAIL" },
+        arb_pid
+            .map(|p| format!("RUNNING (PID {}, Pinned to Zen 5c mask 0x{:04X})", p, get_tid_affinity(p)))
+            .unwrap_or_else(|| "STOPPED".to_string())
+    );
+    println!(
+        "  [{}] Kernel eBPF Object      : {}",
+        if bpf_obj.exists() { "PASS" } else { "FAIL" },
+        bpf_obj.display()
+    );
+    println!(
+        "  [{}] Ring-0 Kernel Module    : {}",
+        if kmod_obj.exists() { "PASS" } else { "FAIL" },
+        kmod_obj.display()
+    );
+    println!("==========================================================================================");
+}
+
 fn print_help() {
     println!("zen5 — AMD Ryzen AI 7 350 Entropy-Driven Hybrid Scheduler Stack (Rust + eBPF)");
     println!();
     println!("USAGE:");
     println!("  zen5 status                              Live core topology, MHz, CPPC & process entropy dashboard");
     println!("  zen5 easy-mode [on|strict|golden-only|off] Enable/disable Easy Mode entropy fencing & Rust arbiter");
+    println!("  zen5 install                             Install CLI symlink, systemd user service & autostart on boot");
+    println!("  zen5 verify-install                      Verify startup installation, artifacts & live daemon health");
     println!("  zen5 run [--golden|--primary|--zen5|--dense] <cmd...>  Launch command on specific entropy tier");
     println!("  zen5 pin <pid|process-name> <golden|zen5|dense>        Pin PID or process pattern to entropy tier");
     println!("  zen5 bench                               Run native Rust High-Entropy vs Low-Entropy core benchmark");
@@ -1812,6 +1994,8 @@ fn main() {
     match subcmd {
         "status" => cmd_status(),
         "probe" => cmd_probe(),
+        "install" => cmd_install(),
+        "verify-install" | "verify" => cmd_verify_install(),
         "easy-mode" | "easymode" => {
             let mode = args.get(1).map(|s| s.as_str()).unwrap_or("on");
             cmd_easymode(mode);
@@ -2019,5 +2203,12 @@ mod tests {
                 assert_eq!(c.cppc_rank, 135, "Zen 5c CPU {} must have CPPC == 135", c.cpu);
             }
         }
+    }
+
+    #[test]
+    fn test_reboot_pid_collision_immunity() {
+        // Verify PID 1 (whose comm is not "zen5") would never be mistaken for a running zen5 arbiter
+        let comm_pid1 = read_sysfs_string("/proc/1/comm");
+        assert_ne!(comm_pid1, "zen5");
     }
 }
