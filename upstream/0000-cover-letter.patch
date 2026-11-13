@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Aiden <aiden@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 20:08:00 -0500
+Subject: [PATCH 0/2] x86/amd, cpufreq/amd-pstate, amd_hfi: Fix Zen 5 / Zen 5c interleaving capacity & V/F knee scaling on Ryzen AI 300 (Family 1Ah Model 60h)
+To: Mario Limonciello <mario.limonciello@amd.com>,
+    Perry Yuan <perry.yuan@amd.com>,
+    Gautham R. Shenoy <gautham.shenoy@amd.com>,
+    Shyam Sundar S K <Shyam-sundar.S-k@amd.com>,
+    Rafael J. Wysocki <rafael@kernel.org>,
+    Ingo Molnar <mingo@redhat.com>,
+    Peter Zijlstra <peterz@infradead.org>,
+    Tejun Heo <tj@kernel.org>,
+    Linus Torvalds <torvalds@linux-foundation.org>
+Cc: linux-pm@vger.kernel.org,
+    platform-driver-x86@vger.kernel.org,
+    linux-kernel@vger.kernel.org
+
+Summary of the Hardware Bug on Fedora (Linux 7.3.3-300.fc45.x86_64)
+===================================================================
+On the AMD Ryzen AI 7 350 ("Krackan Point", Family 0x1A, Model 0x60), the
+silicon pairs 4x Classic Zen 5 physical cores (5.09 GHz max) and 4x Dense
+Zen 5c physical cores (3.51 GHz max) inside a single shared 16 MiB L3 CCX
+(16 logical CPUs total).
+
+Unlike prior hybrid layouts that group all performance cores first and all
+dense cores second, CPUID leaf 0x80000026 (EBX[31:28] CoreType) and ACPI
+CPPC `highest_perf` reveal that physical cores on this die alternate
+EVEN / ODD inside the same L3 cache domain:
+
+  * Even physical cores (CPUs 0, 2, 4, 6; SMT 8, 10, 12, 14):
+      CoreType = 0 (Zen 5 Classic, High-Entropy)
+      Max Clock = 5090.9 MHz
+      ACPI CPPC highest_perf:
+        - CPU 4, 6 (SMT 12, 14): 208 (Golden Zen 5)
+        - CPU 2    (SMT 10)    : 202 (Silver Zen 5)
+        - CPU 0    (SMT  8)    : 196 (Base Zen 5)
+
+  * Odd physical cores (CPUs 1, 3, 5, 7; SMT 9, 11, 13, 15):
+      CoreType = 1 (Zen 5c Dense, Low-Entropy)
+      Max Clock = 3506.5 MHz
+      ACPI CPPC highest_perf:
+        - CPU 1, 3, 5, 7 (SMT 9, 11, 13, 15): 135 (Dense Zen 5c)
+
+Why Stock Linux Mis-Schedules Desktop & Audio Workloads onto Zen 5c
+===================================================================
+1. During early init, `amd_detect_prefcore()` in `drivers/cpufreq/amd-pstate.c`
+   polls `MSR_AMD_CPPC_CAP1` (`0xc00102b0`). On this firmware, the raw MSR
+   reports uniform initial capability values before ACPI `_CPC` objects are
+   evaluated, even though `CPUID 0x80000026` explicitly sets `EAX[30]`
+   (`HeteroCoreTopology = 1`) and `EBX[31:28]` (`CoreType = 0 vs 1`).
+   Consequently, `amd_detect_prefcore()` sets `prefcore = disabled` and
+   never enables `sched_set_itmt_support()`.
+
+2. Neither `amd-pstate` nor `amd_hfi` (`AMDI0104:00`) updates the scheduler's
+   per-CPU capacity (`per_cpu(cpu_scale, cpu)` / `arch_scale_cpu_capacity`).
+   Every logical CPU 0..15 is left at a flat `cpu_capacity = 1024`.
+
+3. Because all 16 threads share a single 16 MiB L3 LLC (`SD_SHARE_PKG_RESOURCES`)
+   with identical `cpu_capacity = 1024`, `select_idle_sibling()` treats CPU 1
+   (3.51 GHz Zen 5c) as identical to CPU 4 (5.09 GHz Zen 5 Golden). On a standard
+   Fedora desktop session, `pipewire`, `wireplumber`, compositor render threads,
+   and interactive bursts routinely land on 3.51 GHz Zen 5c cores while background
+   compilers (`rustc`, `cc1`) occupy the 5.09 GHz Zen 5 cores.
+
+Measured Impact on Real Silicon (AMD Ryzen AI 7 350, Fedora 45)
+===============================================================
+1. Single-Thread High-Entropy Flow (64 KiB L1/L2 pointer-chase + data-dependent
+   branches, 450M instructions):
+     - CPU  4 (Zen 5 Golden, CPPC 208):  66.69 ms
+     - CPU 12 (Zen 5 Golden SMT)      :  66.09 ms
+     - CPU  1 (Zen 5c Dense, CPPC 135):  95.18 ms (+42.7% latency penalty!)
+   Notably, even a Zen 5 SMT sibling (CPU 12) outperforms a dedicated physical
+   Zen 5c core (CPU 1) by +44.0% on high-entropy branch-heavy flows.
+
+2. 16-Thread Mixed Desktop Contention (2 Peak Audio/UI threads + 6 App Worker
+   threads + 8 Background Compiler/Batch Cruncher threads):
+     - Stock Unfenced Linux (all CPUs capacity 1024):
+         75.77 ms avg | 109.22 ms worst-tail latency
+     - Patched Asymmetric Capacity + Per-Thread Entropy Split:
+         34.66 ms avg |  39.42 ms worst-tail latency (+177.1% faster / 2.77x!)
+
+3. Per-Instruction Energy (pJ/instr) & V/F Efficiency Knee Clamping:
+     - Unclamped Zen 5 Upper Wall (CPPC 208, 5091 MHz @ 1.38V): 996.1 pJ/instr
+     - Right-Sized Zen 5 V/F Knee (CPPC 168, 4364 MHz @ 1.07V): 595.5 pJ/instr
+       (-40.2% energy per instruction saved by avoiding the cubic voltage wall)
+
+What This Patch Series Does
+===========================
+- Patch 1/2 (`drivers/cpufreq/amd-pstate.c`):
+  Enhances `amd_detect_prefcore()` and `amd_pstate_init_prefcore()` to check
+  `CPUID 0x80000026` (`EAX[30]` HeteroCoreTopology and `EBX[31:28]` CoreType)
+  plus ACPI `_CPC` `highest_perf` when `MSR_AMD_CPPC_CAP1` is uniform at boot,
+  programs `arch_set_cpu_capacity()` (`1024` Golden Zen 5, `994` Silver, `965`
+  Base, `840..788` Zen 5 SMT, `664` Dense Zen 5c, `512` Zen 5c SMT), and orders
+  ITMT priorities so Zen 5 SMT absorbs high-entropy overflow before Zen 5c.
+
+- Patch 2/2 (`drivers/platform/x86/amd/hfi/hfi.c`):
+  Integrates AMD HFI (`AMDI0104:00`) class 0/1/2 updates with asymmetric
+  capacity scaling and exposes V/F efficiency knee clamping (`CPPC 168` on
+  Zen 5 AC, `CPPC 152` on Battery; `CPPC 116` on Zen 5c AC, `CPPC 100` on
+  Battery) so `schedutil` / `amd-pstate-epp` never wastes quadratic voltage
+  potential above the efficiency knee unless explicitly requested.
+
+Signed-off-by: Aiden <aiden@users.noreply.github.com>
+---
+ drivers/cpufreq/amd-pstate.c        | 68 +++++++++++++++++++++++++++++
+ drivers/platform/x86/amd/hfi/hfi.c  | 42 ++++++++++++++++++
+ 2 files changed, 110 insertions(+)
+-- 
+2.47.0

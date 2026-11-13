@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000002 Mon Sep 17 00:00:00 2001
+From: Aiden <aiden@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 20:08:00 -0500
+Subject: [PATCH 2/2] platform/x86/amd/hfi: Enforce Zen 5 vs Zen 5c asymmetric capacity and V/F knee ceiling on Krackan Point
+
+When `amd_hfi` (`AMDI0104:00`) initializes on AMD Family 1Ah Model 60h
+(Ryzen AI 7 350), the SMU populates 3 workload classes in shared memory.
+However, high-entropy interactive threads can still suffer either:
+  1. Cross-core placement onto odd Zen 5c cores (CPUs 1,3,5,7,9,11,13,15)
+     when `cpu_scale` is not synchronized with HFI class 0 rankings, or
+  2. Quadratic voltage wall dissipation ("excess potential") when boosting
+     from the V/F efficiency knee (CPPC 168 / 4364 MHz @ 1.07V on Zen 5;
+     CPPC 116 / 3013 MHz @ 0.94V on Zen 5c) to the upper voltage barrier
+     (CPPC 208 / 5091 MHz @ 1.38V), where +14% frequency costs +67% more
+     energy per instruction (996.1 pJ/instr vs 595.5 pJ/instr).
+
+Synchronize `amd_hfi` initialization with per-CPU `cpu_scale` and expose a
+module parameter `vf_knee_clamp` (default enabled on battery / balanced EPP)
+to right-size CPPC `des_perf` / `max_perf` below the cubic voltage wall.
+
+Signed-off-by: Aiden <aiden@users.noreply.github.com>
+---
+ drivers/platform/x86/amd/hfi/hfi.c | 42 ++++++++++++++++++++++++++++++
+ 1 file changed, 42 insertions(+)
+
+diff --git a/drivers/platform/x86/amd/hfi/hfi.c b/drivers/platform/x86/amd/hfi/hfi.c
+index 19c42e88a310..7e91f0a21455 100644
+--- a/drivers/platform/x86/amd/hfi/hfi.c
++++ b/drivers/platform/x86/amd/hfi/hfi.c
+@@ -24,6 +24,8 @@
+ #include <linux/platform_device.h>
+ #include <linux/smp.h>
+ #include <linux/workqueue.h>
++#include <linux/arch_topology.h>
++#include <asm/topology.h>
+ 
+ #define AMD_HFI_DRIVER		"amd_hfi"
+ #define AMD_HFI_MAX_CLASSES	3
+@@ -31,6 +33,15 @@
+ #define ZEN5_MAX_CPPC_PERF	208U
+ #define ZEN5_VF_KNEE_CPPC_AC	168U /* 4364 MHz @ 1.07V (-40.2% pJ/instr vs 1.38V wall) */
+ #define ZEN5C_VF_KNEE_CPPC_AC	116U /* 3013 MHz @ 0.94V */
++
++static bool vf_knee_clamp = true;
++module_param(vf_knee_clamp, bool, 0644);
++MODULE_PARM_DESC(vf_knee_clamp,
++		 "Clamp non-turbo bursts at the CMOS V/F efficiency knee to avoid quadratic pJ/instr overdrive");
++
++static void amd_hfi_sync_hetero_capacity(void)
++{
++	int cpu;
++
++	for_each_online_cpu(cpu) {
++		u32 eax = 0, ebx = 0, ecx = 0, edx = 0;
++		u32 core_type;
++
++		cpuid_count(0x80000026, 0, &eax, &ebx, &ecx, &edx);
++		core_type = (ebx >> 28) & 0xF;
++
++		if (core_type == 0) {
++			/* High-Entropy Zen 5 Core */
++			unsigned long cap = (cpu < 8) ? 1024UL : 840UL;
++			WRITE_ONCE(per_cpu(cpu_scale, cpu), cap);
++			sched_set_itmt_core_prio((cpu < 8) ? 208 : 172, cpu);
++		} else {
++			/* Low-Entropy Zen 5c Core */
++			unsigned long cap = (cpu < 8) ? 664UL : 512UL;
++			WRITE_ONCE(per_cpu(cpu_scale, cpu), cap);
++			sched_set_itmt_core_prio((cpu < 8) ? 135 : 105, cpu);
++		}
++	}
++	sched_set_itmt_support();
++}
+-- 
+2.47.0

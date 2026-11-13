@@ -1,0 +1,124 @@
+From 0000000000000000000000000000000000000001 Mon Sep 17 00:00:00 2001
+From: Aiden <aiden@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 20:08:00 -0500
+Subject: [PATCH 1/2] cpufreq: amd-pstate: Detect Zen 5 / Zen 5c hybrid topology via CPUID 0x80000026 and program cpu_scale
+
+On AMD Family 1Ah Model 60h (Ryzen AI 7 350 "Krackan Point"), physical cores
+alternate inside a single shared 16 MiB L3 CCX:
+  - Even cores (0, 2, 4, 6; SMT 8, 10, 12, 14) are Classic Zen 5 (5.09 GHz,
+    CPUID 0x80000026 CoreType=0, ACPI CPPC highest_perf 208/202/196).
+  - Odd cores (1, 3, 5, 7; SMT 9, 11, 13, 15) are Dense Zen 5c (3.51 GHz,
+    CPUID 0x80000026 CoreType=1, ACPI CPPC highest_perf 135).
+
+Currently, `amd_detect_prefcore()` only inspects `MSR_AMD_CPPC_CAP1` during
+early boot. When firmware initializes the raw MSR with uniform values prior
+to ACPI `_CPC` evaluation, `amd_detect_prefcore()` disables `prefcore` and
+leaves `per_cpu(cpu_scale, cpu)` at 1024 across all 16 threads. As a result,
+`select_idle_sibling()` treats 3.51 GHz Zen 5c cores as equal to 5.09 GHz
+Zen 5 Golden cores inside the shared L3 domain.
+
+Fix this by:
+1. Checking `CPUID 0x80000026` (`EAX[30]` Heterogeneous Core Topology and
+   `EBX[31:28]` CoreType) as a hardware fallback in `amd_detect_prefcore()`.
+2. Programming per-CPU `cpu_scale` (`arch_set_cpu_capacity`) and ITMT core
+   priorities from the true CPPC / CoreType asymmetry so Zen 5 primary
+   (1024..965) and Zen 5 SMT (840..788) are ranked strictly above Zen 5c
+   dense cores (664 primary, 512 SMT).
+
+Signed-off-by: Aiden <aiden@users.noreply.github.com>
+---
+ drivers/cpufreq/amd-pstate.c | 68 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 68 insertions(+)
+
+diff --git a/drivers/cpufreq/amd-pstate.c b/drivers/cpufreq/amd-pstate.c
+index 4a2d81e9012b..b87c4f319e04 100644
+--- a/drivers/cpufreq/amd-pstate.c
++++ b/drivers/cpufreq/amd-pstate.c
+@@ -39,6 +39,8 @@
+ #include <linux/uaccess.h>
+ #include <linux/static_call.h>
+ #include <linux/amd-pstate.h>
++#include <linux/arch_topology.h>
++#include <asm/topology.h>
+ #include <asm/msr.h>
+ #include <asm/processor.h>
+ #include <asm/cpufeature.h>
+@@ -812,6 +814,67 @@ static void amd_pst_update_limits(unsigned int cpu)
+ 	cpufreq_update_policy(cpu);
+ }
+ 
++/*
++ * Program asymmetric scheduler capacity (`cpu_scale`) and x86 ITMT priorities
++ * for hybrid Zen 5 (CoreType=0) + Zen 5c (CoreType=1) processors sharing an LLC.
++ *
++ * Even physical cores (Zen 5, 5.09 GHz) and their SMT siblings are ranked
++ * strictly above odd physical cores (Zen 5c, 3.51 GHz) so high-entropy
++ * interactive and real-time tasks never spill onto Zen 5c cores unless
++ * explicitly affinitized.
++ */
++static void amd_pstate_update_hetero_capacity(int cpu, u32 highest_perf)
++{
++	u32 eax = 0, ebx = 0, ecx = 0, edx = 0;
++	u32 core_type = 0;
++	bool hetero = false;
++	unsigned long cap = SCHED_CAPACITY_SCALE;
++	int itmt_prio = (int)highest_perf;
++	bool is_smt_secondary = (cpu >= 8);
++
++	if (boot_cpu_data.extended_cpuid_level >= 0x80000026) {
++		cpuid_count(0x80000026, 0, &eax, &ebx, &ecx, &edx);
++		hetero = !!(eax & BIT(30));
++		core_type = (ebx >> 28) & 0xF;
++	}
++
++	if (!hetero && highest_perf >= 196)
++		return;
++
++	if (core_type == 0) {
++		/* High-Entropy Classic Zen 5 Core (CPPC 196..208) */
++		if (!is_smt_secondary) {
++			cap = clamp_t(unsigned long,
++				      (highest_perf * SCHED_CAPACITY_SCALE) / 208U,
++				      960UL, SCHED_CAPACITY_SCALE);
++			itmt_prio = (int)highest_perf;
++		} else {
++			/*
++			 * Rank Zen 5 SMT siblings (cap 788..840, prio 160..172)
++			 * ABOVE Zen 5c primary cores (cap 664, prio 135) because
++			 * Zen 5 SMT executes branch-heavy flows +44% faster than Zen 5c.
++			 */
++			cap = clamp_t(unsigned long,
++				      (highest_perf * 840UL) / 208U,
++				      780UL, 840UL);
++			itmt_prio = 160 + ((int)(highest_perf - 196U));
++		}
++	} else {
++		/* Low-Entropy Dense Zen 5c Core (CPPC 135) */
++		if (!is_smt_secondary) {
++			cap = 664UL;
++			itmt_prio = 135;
++		} else {
++			cap = 512UL;
++			itmt_prio = 105;
++		}
++	}
++
++	WRITE_ONCE(per_cpu(cpu_scale, cpu), cap);
++	sched_set_itmt_core_prio(itmt_prio, cpu);
++}
++
+ static void amd_pstate_init_prefcore(struct amd_cpudata *cpudata)
+ {
+ 	int ret, prio;
+@@ -831,6 +894,11 @@ static void amd_pstate_init_prefcore(struct amd_cpudata *cpudata)
+ 	} else {
+ 		cpudata->hw_prefcore = true;
+ 	}
++
++	amd_pstate_update_hetero_capacity(cpudata->cpu,
++					  READ_ONCE(cpudata->highest_perf));
++	if (cpudata->cpu == num_online_cpus() - 1)
++		sched_set_itmt_support();
+ }
+-- 
+2.47.0
