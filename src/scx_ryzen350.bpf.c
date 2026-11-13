@@ -283,6 +283,8 @@ static __always_inline s32 try_pick_idle_from_list(const struct task_struct *p, 
 
 s32 BPF_STRUCT_OPS(ryzen350_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
+    (void)ctx;
+    (void)wake_flags;
     u32 zero = 0;
     struct ryzen350_stats *st = bpf_map_lookup_elem(&stats_map, &zero);
     struct task_Telemetry *tel = bpf_task_storage_get(&task_telemetry_map, p, 0,
@@ -398,6 +400,7 @@ s32 BPF_STRUCT_OPS(ryzen350_select_cpu, struct task_struct *p, s32 prev_cpu, u64
 
 void BPF_STRUCT_OPS(ryzen350_enqueue, struct task_struct *p, u64 enq_flags)
 {
+    (void)ctx;
     u32 zero = 0;
     struct ryzen350_stats *st = bpf_map_lookup_elem(&stats_map, &zero);
 
@@ -431,8 +434,13 @@ void BPF_STRUCT_OPS(ryzen350_enqueue, struct task_struct *p, u64 enq_flags)
         if (st)
             __sync_fetch_and_add(&st->zen5_golden_dispatches, 1);
         s32 prev_c = scx_bpf_task_cpu(p);
-        s32 kick_c = is_zen5_golden_cpu(prev_c) ? prev_c : ((p->pid & 1) ? 6 : 4);
-        scx_bpf_kick_cpu(kick_c, SCX_KICK_IDLE | SCX_KICK_PREEMPT);
+        s32 pref_c = (p->pid & 1) ? 6 : 4;
+        s32 alt_c = (pref_c == 6) ? 4 : 6;
+        s32 kick_c = (is_zen5_golden_cpu(prev_c) && cpu_allowed(p, prev_c)) ? prev_c
+                   : (cpu_allowed(p, pref_c) ? pref_c
+                   : (cpu_allowed(p, alt_c) ? alt_c : -1));
+        if (kick_c >= 0)
+            scx_bpf_kick_cpu(kick_c, SCX_KICK_IDLE | SCX_KICK_PREEMPT);
     } else if (tier == TIER_ZEN5_STRICT) {
         dsq_insert_compat(p, DSQ_ZEN5_PRIMARY, zen5_slice_ns, enq_flags);
         if (st)
@@ -446,6 +454,8 @@ void BPF_STRUCT_OPS(ryzen350_enqueue, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(ryzen350_dispatch, s32 cpu, struct task_struct *prev)
 {
+    (void)ctx;
+    (void)prev;
     if (is_zen5_golden_cpu(cpu)) {
         /* Peak-Entropy Golden Zen 5 cores (4, 6) */
         if (dsq_move_to_local_compat(DSQ_ZEN5_GOLDEN))
@@ -491,6 +501,7 @@ void BPF_STRUCT_OPS(ryzen350_dispatch, s32 cpu, struct task_struct *prev)
 
 void BPF_STRUCT_OPS(ryzen350_running, struct task_struct *p)
 {
+    (void)ctx;
     s32 cpu = scx_bpf_task_cpu(p);
     u32 zero = 0;
     struct ryzen350_stats *st = bpf_map_lookup_elem(&stats_map, &zero);
@@ -520,7 +531,11 @@ void BPF_STRUCT_OPS(ryzen350_running, struct task_struct *p)
                               ? cfg->zen5_barrier_cap
                               : (on_bat ? ZEN5_BARRIER_CAP_BAT : ZEN5_BARRIER_CAP_AC);
             /* Scale proportionally between nominal (380 -> 2.0 GHz) and barrier_cap (825 -> 4.36 GHz) */
-            req_perf = 380U + ((score * (barrier_cap - 380U)) / 1000U);
+            if (barrier_cap <= 380U) {
+                req_perf = barrier_cap;
+            } else {
+                req_perf = 380U + ((score * (barrier_cap - 380U)) / 1000U);
+            }
             if (req_perf >= barrier_cap) {
                 req_perf = barrier_cap;
                 if (st)
@@ -531,7 +546,11 @@ void BPF_STRUCT_OPS(ryzen350_running, struct task_struct *p)
                               ? cfg->zen5c_barrier_cap
                               : (on_bat ? ZEN5C_BARRIER_CAP_BAT : ZEN5C_BARRIER_CAP_AC);
             /* Scale Low-Entropy Zen 5c between 360 (1.23 GHz) and barrier_cap (858 -> 3.01 GHz) */
-            req_perf = 360U + ((score * (barrier_cap - 360U)) / 600U);
+            if (barrier_cap <= 360U) {
+                req_perf = barrier_cap;
+            } else {
+                req_perf = 360U + ((score * (barrier_cap - 360U)) / 600U);
+            }
             if (req_perf >= barrier_cap) {
                 req_perf = barrier_cap;
                 if (st)
@@ -547,6 +566,8 @@ void BPF_STRUCT_OPS(ryzen350_running, struct task_struct *p)
 
 void BPF_STRUCT_OPS(ryzen350_stopping, struct task_struct *p, bool runnable)
 {
+    (void)ctx;
+    (void)runnable;
     struct task_Telemetry *tel = bpf_task_storage_get(&task_telemetry_map, p, 0, 0);
     if (!tel)
         return;
@@ -631,6 +652,7 @@ void BPF_STRUCT_OPS(ryzen350_stopping, struct task_struct *p, bool runnable)
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(ryzen350_init)
 {
+    (void)ctx;
     s32 err;
 
     err = scx_bpf_create_dsq(DSQ_ZEN5_GOLDEN, -1);

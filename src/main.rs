@@ -2311,7 +2311,14 @@ fn cmd_verify_install() {
         "  [{}] Live Rust Arbiter Daemon: {}",
         if arb_pid.is_some() && arb_on_zen5c { "PASS" } else { "FAIL" },
         arb_pid
-            .map(|p| format!("RUNNING (PID {}, Pinned to Zen 5c mask 0x{:04X})", p, get_tid_affinity(p)))
+            .map(|p| {
+                let mask = get_tid_affinity(p);
+                if mask == ZEN5C_ALL_MASK {
+                    format!("RUNNING (PID {}, Pinned to Zen 5c mask 0x{:04X})", p, mask)
+                } else {
+                    format!("RUNNING (PID {}, Mask 0x{:04X}, expected Zen 5c 0x{:04X})", p, mask, ZEN5C_ALL_MASK)
+                }
+            })
             .unwrap_or_else(|| "STOPPED".to_string())
     );
     println!(

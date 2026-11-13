@@ -12,7 +12,7 @@ rust:
 kmod:
 	$(MAKE) -C kmod
 	mkdir -p bin
-	cp kmod/zen5_entropy_kmod.ko bin/zen5_entropy_kmod.ko
+	cp -f kmod/zen5_entropy_kmod.ko bin/zen5_entropy_kmod.ko
 
 test:
 	cargo test
