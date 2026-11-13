@@ -308,6 +308,20 @@ s32 BPF_STRUCT_OPS(ryzen350_select_cpu, struct task_struct *p, s32 prev_cpu, u64
         tel->last_wake_at_ns = now;
     }
 
+    /*
+     * 0. ZERO-FRICTION PER-CPU KTHREAD FAST-PATH:
+     *    Tasks strictly bound to a single CPU (e.g., kworker/u, migration/N, rcuop)
+     *    must dispatch directly to SCX_DSQ_LOCAL on prev_cpu without entering shared DSQs.
+     */
+    if (p->nr_cpus_allowed == 1 && cpu_allowed(p, prev_cpu)) {
+        if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+            if (st)
+                __sync_fetch_and_add(&st->direct_idle_hits, 1);
+            dsq_insert_compat(p, SCX_DSQ_LOCAL, zen5_slice_ns, 0);
+        }
+        return prev_cpu;
+    }
+
     u32 tier = classify_task_by_entropy(p, tel, st);
     if (tel)
         tel->tier = tier;
@@ -317,8 +331,9 @@ s32 BPF_STRUCT_OPS(ryzen350_select_cpu, struct task_struct *p, s32 prev_cpu, u64
     if (tier == TIER_ZEN5_GOLDEN || tier == TIER_ZEN5_STRICT) {
         /*
          * HIGH-ENTROPY FLOW (Zen 5 — CPUs 4,6 -> 2,0 -> 12,14,10,8):
-         * If prev_cpu was a Low-Entropy Zen 5c core (1,3,5,7,9,11,13,15),
-         * NEVER keep it there — migrate immediately to a High-Entropy Zen 5 core!
+         * 1. L1/L2 Cache Continuity: Prefer prev_cpu first if it is an idle Zen 5 primary core!
+         *    If prev_cpu was a Low-Entropy Zen 5c core (1,3,5,7,9,11,13,15),
+         *    NEVER keep it there — migrate immediately to a High-Entropy Zen 5 core!
          */
         if (tier == TIER_ZEN5_GOLDEN && is_zen5_golden_cpu(prev_cpu) &&
             cpu_allowed(p, prev_cpu) && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
@@ -328,15 +343,21 @@ s32 BPF_STRUCT_OPS(ryzen350_select_cpu, struct task_struct *p, s32 prev_cpu, u64
             cpu = prev_cpu;
         }
 
-        /* 1. Peak-Entropy Golden Zen 5 physical cores (4, 6 - CPPC 208) */
+        /* 2. Peak-Entropy Golden Zen 5 physical cores (4, 6 - CPPC 208) */
         if (cpu < 0)
             cpu = try_pick_idle_from_list(p, zen5_golden_order, 2);
 
-        /* 2. High-Entropy Silver/Base Zen 5 physical cores (2, 0 - CPPC 202/196) */
+        /* 3. High-Entropy Silver/Base Zen 5 physical cores (2, 0 - CPPC 202/196) */
         if (cpu < 0)
             cpu = try_pick_idle_from_list(p, zen5_silver_order, 2);
 
-        /* 3. High-Entropy Zen 5 SMT siblings (12, 14, 10, 8) BEFORE ever touching Zen 5c! */
+        /* 4. Warm L2 Cache Continuity on Zen 5 SMT before scanning cold Zen 5 SMT siblings */
+        if (cpu < 0 && is_zen5_cpu(prev_cpu) &&
+            cpu_allowed(p, prev_cpu) && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+            cpu = prev_cpu;
+        }
+
+        /* 5. High-Entropy Zen 5 SMT siblings (12, 14, 10, 8) BEFORE ever touching Zen 5c! */
         if (cpu < 0)
             cpu = try_pick_idle_from_list(p, zen5_smt_order, 4);
 
@@ -379,6 +400,13 @@ void BPF_STRUCT_OPS(ryzen350_enqueue, struct task_struct *p, u64 enq_flags)
 {
     u32 zero = 0;
     struct ryzen350_stats *st = bpf_map_lookup_elem(&stats_map, &zero);
+
+    /* Per-CPU bound kthreads/tasks go directly to their local DSQ to prevent cross-CPU DSQ head-of-line blocking */
+    if (p->nr_cpus_allowed == 1) {
+        dsq_insert_compat(p, SCX_DSQ_LOCAL, zen5_slice_ns, enq_flags);
+        return;
+    }
+
     struct task_Telemetry *tel = bpf_task_storage_get(&task_telemetry_map, p, 0,
                                                       BPF_LOCAL_STORAGE_GET_F_CREATE);
     u32 tier = tel ? tel->tier : TIER_AUTO;
@@ -402,7 +430,9 @@ void BPF_STRUCT_OPS(ryzen350_enqueue, struct task_struct *p, u64 enq_flags)
         dsq_insert_compat(p, DSQ_ZEN5_GOLDEN, zen5_slice_ns, enq_flags);
         if (st)
             __sync_fetch_and_add(&st->zen5_golden_dispatches, 1);
-        scx_bpf_kick_cpu(4, SCX_ENQ_PREEMPT);
+        s32 prev_c = scx_bpf_task_cpu(p);
+        s32 kick_c = is_zen5_golden_cpu(prev_c) ? prev_c : ((p->pid & 1) ? 6 : 4);
+        scx_bpf_kick_cpu(kick_c, SCX_KICK_IDLE | SCX_KICK_PREEMPT);
     } else if (tier == TIER_ZEN5_STRICT) {
         dsq_insert_compat(p, DSQ_ZEN5_PRIMARY, zen5_slice_ns, enq_flags);
         if (st)
@@ -557,6 +587,13 @@ void BPF_STRUCT_OPS(ryzen350_stopping, struct task_struct *p, bool runnable)
         u64 instrs = (cycles * ipc_x100) / 100ULL;
 
         u64 v_mv = 660ULL + ((perf * 460ULL) >> 10);
+        if (zen5 && perf > 825ULL) {
+            u64 d = perf - 825ULL;
+            v_mv += (d * d) / 140ULL; /* Quadratic upper-barrier overdrive above 4.36 GHz knee */
+        } else if (!zen5 && perf > 858ULL) {
+            u64 d = perf - 858ULL;
+            v_mv += (d * d) / 200ULL; /* Quadratic upper-barrier overdrive above 3.01 GHz knee */
+        }
         u64 c_eff_x100 = zen5 ? 118ULL : 86ULL; /* 1.18 nF Zen 5 vs 0.86 nF Zen 5c */
         u64 e_pj_per_instr = (c_eff_x100 * v_mv * v_mv) / (1000ULL * ipc_x100);
         if (e_pj_per_instr < 10ULL)
