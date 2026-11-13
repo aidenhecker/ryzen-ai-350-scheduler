@@ -18,6 +18,8 @@ Synchronize `amd_hfi` initialization with per-CPU `cpu_scale` and expose a
 module parameter `vf_knee_clamp` (default enabled on battery / balanced EPP)
 to right-size CPPC `des_perf` / `max_perf` below the cubic voltage wall.
 
+Assisted-by: Antigravity (Google DeepMind)
+Tested-by: Aiden <aiden@users.noreply.github.com>
 Signed-off-by: Aiden <aiden@users.noreply.github.com>
 ---
  drivers/platform/x86/amd/hfi/hfi.c | 42 ++++++++++++++++++++++++++++++

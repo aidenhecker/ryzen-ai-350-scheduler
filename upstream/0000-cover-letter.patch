@@ -101,6 +101,8 @@ What This Patch Series Does
   Battery) so `schedutil` / `amd-pstate-epp` never wastes quadratic voltage
   potential above the efficiency knee unless explicitly requested.
 
+Assisted-by: Antigravity (Google DeepMind)
+Tested-by: Aiden <aiden@users.noreply.github.com> # AMD Ryzen AI 7 350 (Fedora 45, 7.3.3-300.fc45.x86_64)
 Signed-off-by: Aiden <aiden@users.noreply.github.com>
 ---
  drivers/cpufreq/amd-pstate.c        | 68 +++++++++++++++++++++++++++++

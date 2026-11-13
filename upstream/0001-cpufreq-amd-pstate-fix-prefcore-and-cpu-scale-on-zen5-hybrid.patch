@@ -25,6 +25,8 @@ Fix this by:
    (1024..965) and Zen 5 SMT (840..788) are ranked strictly above Zen 5c
    dense cores (664 primary, 512 SMT).
 
+Assisted-by: Antigravity (Google DeepMind)
+Tested-by: Aiden <aiden@users.noreply.github.com>
 Signed-off-by: Aiden <aiden@users.noreply.github.com>
 ---
  drivers/cpufreq/amd-pstate.c | 68 ++++++++++++++++++++++++++++++++++++

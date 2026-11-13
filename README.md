@@ -3,6 +3,7 @@
 [![Language: Rust](https://img.shields.io/badge/Language-Rust_2021-orange.svg)](#)
 [![Kernel: eBPF sched_ext + Ring-0 LKM](https://img.shields.io/badge/Kernel-eBPF_sched__ext_%2B_Ring--0_LKM-blue.svg)](#)
 [![Silicon: AMD Ryzen AI 7 350 (Krackan Point)](https://img.shields.io/badge/Silicon-AMD_Ryzen_AI_7_350_(Zen_5_%2B_Zen_5c)-red.svg)](#)
+[![Built in: Google Antigravity](https://img.shields.io/badge/Built_in-Google_Antigravity_(Gemini)-purple.svg)](#7-authors--attribution)
 [![License: GPL-2.0](https://img.shields.io/badge/License-GPL--2.0-green.svg)](LICENSE)
 
 > **Reverse-engineered hybrid CPU scheduler for the AMD Ryzen AI 7 350 ("Krackan Point", Family `0x1A` Model `0x60`) written in native Rust + Linux `sched_ext` eBPF + Ring-0 Kernel Module.**
@@ -196,5 +197,22 @@ sudo ./bin/zen5 scx-load
 
 ---
 
-## 6. License
+## 6. Upstream Linux Kernel Patch Series (`upstream/`)
+
+Ready-to-submit LKML patches for `drivers/cpufreq/amd-pstate.c` and `drivers/platform/x86/amd/hfi/hfi.c` are located in [`upstream/`](upstream/):
+- [`upstream/0000-cover-letter.patch`](upstream/0000-cover-letter.patch) — `[PATCH 0/2]` Cover letter with `CPUID 0x80000026` topology dump, contention benchmarks (`+177.1%` tail-latency speedup), and per-instruction energy ($\text{pJ/instr}$) derivation.
+- [`upstream/0001-cpufreq-amd-pstate-fix-prefcore-and-cpu-scale-on-zen5-hybrid.patch`](upstream/0001-cpufreq-amd-pstate-fix-prefcore-and-cpu-scale-on-zen5-hybrid.patch) — `[PATCH 1/2]` Hardware `CPUID 0x80000026` detection and asymmetric `cpu_scale` (`1024..965` Zen 5, `840..788` Zen 5 SMT, `664` Zen 5c) + ITMT ranking.
+- [`upstream/0002-platform-x86-amd-hfi-enforce-zen5-vs-zen5c-asymmetric-capacity.patch`](upstream/0002-platform-x86-amd-hfi-enforce-zen5-vs-zen5c-asymmetric-capacity.patch) — `[PATCH 2/2]` AMD HFI (`AMDI0104:00`) capacity synchronization and CMOS V/F efficiency knee clamping.
+- [`upstream/SEND_TO_LKML.sh`](upstream/SEND_TO_LKML.sh) — Pre-configured `git send-email` helper for `linux-pm@vger.kernel.org`, `platform-driver-x86@vger.kernel.org`, and `linux-kernel@vger.kernel.org`.
+
+---
+
+## 7. Authors & Attribution
+
+- **Aiden** — *Creator, Hardware Architecture & Execution-Entropy / Zero-Excess-Potential Physics Concept, Silicon Testing (AMD Ryzen AI 7 350, Fedora 45)*
+- **Antigravity (Google DeepMind)** — *Co-Engineer: Kernel Reverse-Engineering (`vmlinux` disassembly, `CPUID 0x80000026`/`0x80000027`), Native Rust Engine, `sched_ext` eBPF Dispatcher, and Ring-0 Linux Kernel Module*
+
+---
+
+## 8. License
 Licensed under the **GNU General Public License v2.0 (GPL-2.0)** — see [LICENSE](LICENSE).
