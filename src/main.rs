@@ -1348,6 +1348,10 @@ fn cmd_status() {
     let scx_state = read_sysfs_string("/sys/kernel/sched_ext/state");
     let scx_ops = read_sysfs_string("/sys/kernel/sched_ext/root/ops");
     let hfi_bound = Path::new("/sys/bus/platform/drivers/amd_hfi/AMDI0104:00").exists();
+    let kmod_loaded = Path::new("/proc/zen5_entropy").exists();
+    let cap_base = read_sysfs_string("/sys/devices/system/cpu/cpu0/cpu_capacity");
+    let cap_dense = read_sysfs_string("/sys/devices/system/cpu/cpu1/cpu_capacity");
+    let cap_gold = read_sysfs_string("/sys/devices/system/cpu/cpu4/cpu_capacity");
 
     println!("{}", "=".repeat(106));
     println!(" AMD Ryzen AI 7 350 — Rust Entropy-Driven Hybrid Scheduler & Per-Instruction Energy Status");
@@ -1373,7 +1377,7 @@ fn cmd_status() {
         pwr.zen5c_barrier_cppc
     );
     println!(
-        " Rust Arbiter: {:<18} | sched_ext: {:<14} | AMD HFI: {}",
+        " Rust Arbiter: {:<18} | sched_ext: {:<14} | Ring-0 Kmod: {} (cap G{}/B{}/5c{}) | HFI: {}",
         arb_pid
             .map(|p| format!("ACTIVE (PID {})", p))
             .unwrap_or_else(|| "STOPPED".to_string()),
@@ -1384,8 +1388,12 @@ fn cmd_status() {
         } else {
             scx_state
         },
+        if kmod_loaded { "LOADED" } else { "OFF" },
+        if cap_gold.is_empty() { "?" } else { &cap_gold },
+        if cap_base.is_empty() { "?" } else { &cap_base },
+        if cap_dense.is_empty() { "?" } else { &cap_dense },
         if hfi_bound {
-            "BOUND (AMDI0104, 3 Classes)"
+            "AMDI0104"
         } else {
             "UNBOUND"
         }
@@ -2099,15 +2107,38 @@ fn cmd_hw_tune(action: &str) {
 
     println!("=== [zen5 hw-tune] Applying AMD Ryzen AI 7 350 Ring-0 Kernel & Hardware Entropy Tuning ===");
 
-    // 1. Load Ring-0 Kernel Module (zen5_entropy_kmod.ko) if compiled
+    // 1. Load Ring-0 Kernel Module (prefer insmod if signed local build exists, else modprobe)
     let kmod_path = project_dir().join("bin/zen5_entropy_kmod.ko");
-    if kmod_path.exists() {
-        let _ = Command::new("rmmod").arg("zen5_entropy_kmod").stderr(Stdio::null()).status();
-        if let Ok(st) = Command::new("insmod").arg(&kmod_path).status() {
-            if st.success() {
-                println!("  [✓] Loaded Ring-0 Kernel Module: zen5_entropy_kmod.ko (/proc/zen5_entropy active)");
-            }
-        }
+    let _ = Command::new("rmmod")
+        .arg("zen5_entropy_kmod")
+        .stderr(Stdio::null())
+        .status();
+    let kmod_loaded = if kmod_path.exists()
+        && Command::new("insmod")
+            .arg(&kmod_path)
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    {
+        println!("  [✓] Loaded Ring-0 Kernel Module: {} (/proc/zen5_entropy active)", kmod_path.display());
+        true
+    } else if Command::new("modprobe")
+        .arg("zen5_entropy_kmod")
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        println!("  [✓] Loaded Ring-0 Kernel Module via modprobe (/proc/zen5_entropy active)");
+        true
+    } else {
+        false
+    };
+    if !kmod_loaded {
+        eprintln!(
+            "  [!] Ring-0 Kernel Module not loaded (run './upstream/APPLY_TO_COMPUTER.sh kmod' to sign & enroll)"
+        );
     }
     let pwr = detect_power_state();
     // Compute right-sized upper-barrier kHz ceilings so hardware boost never crosses the cubic V/F wall
@@ -2301,11 +2332,15 @@ fn cmd_verify_install() {
         if desktop_path.exists() { "PASS" } else { "FAIL" },
         desktop_path.display()
     );
+    let kmod_active = Path::new("/proc/zen5_entropy").exists();
+    let cap_gold = read_sysfs_string("/sys/devices/system/cpu/cpu4/cpu_capacity");
+    let cap_dense = read_sysfs_string("/sys/devices/system/cpu/cpu1/cpu_capacity");
+    let cap_asym = !cap_gold.is_empty() && !cap_dense.is_empty() && cap_gold != cap_dense;
     println!(
         "  [{}] Persistent Config State : mode={} ({})",
         if cfg.mode == "strict" || cfg.mode == "golden-only" { "PASS" } else { "WARN" },
         cfg.mode.to_uppercase(),
-        config_dir().join("state.conf").display()
+        config_dir().join("mode.cfg").display()
     );
     println!(
         "  [{}] Live Rust Arbiter Daemon: {}",
@@ -2330,6 +2365,15 @@ fn cmd_verify_install() {
         "  [{}] Ring-0 Kernel Module    : {}",
         if kmod_obj.exists() { "PASS" } else { "FAIL" },
         kmod_obj.display()
+    );
+    println!(
+        "  [{}] Ring-0 Asymmetric Cap   : {}",
+        if kmod_active && cap_asym { "PASS" } else { "WARN" },
+        if kmod_active {
+            format!("ACTIVE (/proc/zen5_entropy, Golden={} Dense={})", cap_gold, cap_dense)
+        } else {
+            format!("NOT LOADED (Golden={} Dense={}, run ./upstream/APPLY_TO_COMPUTER.sh kmod)", cap_gold, cap_dense)
+        }
     );
     println!("==========================================================================================");
 }
