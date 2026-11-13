@@ -1,0 +1,84 @@
+From 80e9f4d8b4083c93c77eb3b2babead1bd2f53bec Mon Sep 17 00:00:00 2001
+From: Aiden Hecker <heckeraiden@gmail.com>
+Date: Thu, 12 Nov 2026 20:56:47 -0500
+Subject: [PATCH v2 0/2] cpufreq: amd-pstate, platform/x86/amd/hfi: Enable hybrid capacity scaling & SMT ITMT ordering on Zen 5 / Zen 5c
+To: Huang Rui <ray.huang@amd.com>,
+    Mario Limonciello <mario.limonciello@amd.com>,
+    Perry Yuan <perry.yuan@amd.com>,
+    K Prateek Nayak <kprateek.nayak@amd.com>,
+    Rafael J. Wysocki <rafael@kernel.org>,
+    Viresh Kumar <viresh.kumar@linaro.org>,
+    Hans de Goede <hansg@kernel.org>,
+    Ilpo Järvinen <ilpo.jarvinen@linux.intel.com>
+Cc: Ingo Molnar <mingo@redhat.com>,
+    Peter Zijlstra <peterz@infradead.org>,
+    linux-pm@vger.kernel.org,
+    platform-driver-x86@vger.kernel.org,
+    linux-kernel@vger.kernel.org
+
+Hardware Observation on AMD Ryzen AI 7 350 ("Krackan Point", Family 1Ah Model 60h)
+=================================================================================
+On AMD Ryzen AI 7 350 (Fedora 45, Linux 7.3.3-300.fc45.x86_64 and linux-pm 7.4-rc2),
+the silicon interleaves 4 Classic Zen 5 physical cores (5.09 GHz max, CPUID
+0x80000026 CoreType=0 / TOPO_CPU_TYPE_PERFORMANCE, ACPI CPPC prefcore_ranking
+208/202/196) and 4 Dense Zen 5c physical cores (3.51 GHz max, CoreType=1 /
+TOPO_CPU_TYPE_EFFICIENCY, prefcore_ranking 135) inside a single 16 MiB L3 CCX:
+
+  * Even CPUs (0, 2, 4, 6; SMT 8, 10, 12, 14): Classic Zen 5 (5090.9 MHz)
+  * Odd CPUs  (1, 3, 5, 7; SMT 9, 11, 13, 15): Dense Zen 5c  (3506.5 MHz)
+
+Observed Issues in Mainline Linux
+---------------------------------
+1. When X86_FEATURE_AMD_WORKLOAD_CLASS and CONFIG_AMD_HFI are enabled,
+   amd_pstate_init_prefcore() disables amd_pstate_prefcore and delegates ITMT
+   priorities to amd_hfi (`AMDI0104:00`). However, neither amd-pstate nor amd_hfi
+   calls arch_enable_hybrid_capacity_scale(), arch_set_cpu_capacity(), or
+   topology_set_cpu_scale(), leaving /sys/devices/system/cpu/cpu*/cpu_capacity
+   and arch_scale_cpu_capacity() at a uniform 1024 across all 16 threads.
+2. In drivers/platform/x86/amd/hfi/hfi.c, amd_set_hfi_ipcc_score() passes the
+   class 0 IPCC score identically for primary threads and secondary SMT siblings,
+   without distinguishing SMT secondaries via topology_sibling_cpumask().
+
+Measured Impact on Real Silicon (Ryzen AI 7 350)
+------------------------------------------------
+- High-entropy 64 KiB pointer-chase + branch workload (450M instructions):
+    * CPU  4 (Zen 5 Golden, CPPC 208):  66.69 ms
+    * CPU 12 (Zen 5 Golden SMT)      :  66.09 ms
+    * CPU  1 (Zen 5c Dense, CPPC 135):  95.18 ms (+42.7% latency penalty)
+- 16-thread mixed desktop/audio contention benchmark (2 critical + 6 worker
+  + 8 background cruncher threads):
+    * Unfenced equal-capacity placement: 75.77 ms avg | 109.22 ms worst-tail
+    * Hybrid core partitioning:          34.66 ms avg |  39.42 ms worst-tail
+
+Changes in v2
+-------------
+- Rebased cleanly onto rafael/linux-pm.git (v7.4-rc2) and generated with git
+  format-patch; full `bzImage` + modules + `W=1 KCFLAGS="-Werror"` build-tested
+  and verified `0 errors, 0 warnings, 0 checks` with `scripts/checkpatch.pl --strict`.
+- Patch 1/2 (`drivers/cpufreq/amd-pstate.c`):
+  * Uses x86 `arch_enable_hybrid_capacity_scale()`, `arch_set_cpu_capacity()`,
+    `topology_set_cpu_scale()`, and workqueue-deferred `rebuild_sched_domains()`
+    rather than writing generic `cpu_scale` directly.
+  * Synchronizes SMT sibling capacities via `topology_sibling_cpumask()` so
+    `SD_SHARE_CPUCAPACITY | SD_ASYM_CPUCAPACITY` warnings never trigger in
+    `kernel/sched/topology.c`.
+  * Removes hardcoded CPU index checks and boot-order `num_online_cpus()` races.
+- Patch 2/2 (`drivers/platform/x86/amd/hfi/hfi.c`):
+  * Scales secondary SMT sibling ITMT priorities (7/8 of primary IPCC score) via
+    `topology_sibling_cpumask()` when `X86_FEATURE_AMD_HTR_CORES` is set.
+  * Removes unreferenced module-parameter stubs and raw per-CPU `cpuid_count()`
+    loops.
+- Updated recipient list using `scripts/get_maintainer.pl`.
+
+Aiden Hecker (2):
+  cpufreq: amd-pstate: Enable hybrid CPU capacity scaling on
+    heterogeneous Zen CPUs
+  platform/x86/amd/hfi: Rank SMT siblings below primary cores for ITMT
+    packing
+
+ drivers/cpufreq/amd-pstate.c       | 121 +++++++++++++++++++++++++++++
+ drivers/platform/x86/amd/hfi/hfi.c |  18 ++++-
+ 2 files changed, 138 insertions(+), 1 deletion(-)
+
+-- 
+2.56.1

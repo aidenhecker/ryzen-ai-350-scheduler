@@ -64,8 +64,15 @@ static const int ryzen350_itmt_prio[MAX_RYZEN350_CPUS] = {
 	[15] = 105, /* Zen 5c Dense SMT */
 };
 
+/*
+ * Per-CPU compute capacity table for AMD Ryzen AI 7 350.
+ *
+ * SMT siblings of a physical core MUST share identical `arch_scale_cpu_capacity`
+ * (kernel/sched/topology.c enforces `!(SD_SHARE_CPUCAPACITY & SD_ASYM_CPUCAPACITY)`),
+ * while `ryzen350_itmt_prio` orders primary Zen 5 > Zen 5 SMT > Zen 5c via ITMT.
+ */
 static const unsigned long ryzen350_entropy_capacity[MAX_RYZEN350_CPUS] = {
-	[0]  = 965,  /* Zen 5 Base (196/208 * 1024) */
+	[0]  = 965,  /* Zen 5 Base   (196/208 * 1024) */
 	[1]  = 664,  /* Zen 5c Dense (135/208 * 1024) */
 	[2]  = 994,  /* Zen 5 Silver (202/208 * 1024) */
 	[3]  = 664,  /* Zen 5c Dense */
@@ -73,15 +80,25 @@ static const unsigned long ryzen350_entropy_capacity[MAX_RYZEN350_CPUS] = {
 	[5]  = 664,  /* Zen 5c Dense */
 	[6]  = 1024, /* Zen 5 Golden #2 (Peak Entropy) */
 	[7]  = 664,  /* Zen 5c Dense */
-	[8]  = 788,  /* Zen 5 Base SMT (> 664 so Zen 5 SMT absorbs overflow) */
-	[9]  = 512,  /* Zen 5c Dense SMT */
-	[10] = 812,  /* Zen 5 Silver SMT */
-	[11] = 512,  /* Zen 5c Dense SMT */
-	[12] = 840,  /* Zen 5 Golden #1 SMT */
-	[13] = 512,  /* Zen 5c Dense SMT */
-	[14] = 840,  /* Zen 5 Golden #2 SMT */
-	[15] = 512,  /* Zen 5c Dense SMT */
+	[8]  = 965,  /* Zen 5 Base SMT   (symmetric with sibling CPU 0) */
+	[9]  = 664,  /* Zen 5c Dense SMT (symmetric with sibling CPU 1) */
+	[10] = 994,  /* Zen 5 Silver SMT (symmetric with sibling CPU 2) */
+	[11] = 664,  /* Zen 5c Dense SMT (symmetric with sibling CPU 3) */
+	[12] = 1024, /* Zen 5 Golden #1 SMT (symmetric with sibling CPU 4) */
+	[13] = 664,  /* Zen 5c Dense SMT (symmetric with sibling CPU 5) */
+	[14] = 1024, /* Zen 5 Golden #2 SMT (symmetric with sibling CPU 6) */
+	[15] = 664,  /* Zen 5c Dense SMT (symmetric with sibling CPU 7) */
 };
+
+static const unsigned long ryzen350_highest_perf[MAX_RYZEN350_CPUS] = {
+	[0]  = 196, [1]  = 135, [2]  = 202, [3]  = 135,
+	[4]  = 208, [5]  = 135, [6]  = 208, [7]  = 135,
+	[8]  = 196, [9]  = 135, [10] = 202, [11] = 135,
+	[12] = 208, [13] = 135, [14] = 208, [15] = 135,
+};
+
+#define RYZEN350_MAX_PERF	208UL
+#define RYZEN350_NOMINAL_PERF	77UL
 
 typedef void (*sched_set_itmt_core_prio_fn)(int prio, int core_cpu);
 typedef int (*sched_set_itmt_support_fn)(void);
@@ -212,7 +229,10 @@ static int __init zen5_entropy_kmod_init(void)
 		prio = ryzen350_itmt_prio[cpu];
 
 		if (set_arch_cap_fn)
-			set_arch_cap_fn(cpu, cap, SCHED_CAPACITY_SCALE, 1, 1);
+			set_arch_cap_fn(cpu, ryzen350_highest_perf[cpu],
+					RYZEN350_MAX_PERF,
+					ryzen350_highest_perf[cpu],
+					RYZEN350_NOMINAL_PERF);
 
 		WRITE_ONCE(per_cpu(cpu_scale, cpu), cap);
 

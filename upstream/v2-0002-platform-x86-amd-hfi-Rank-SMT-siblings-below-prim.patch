@@ -1,0 +1,81 @@
+From 80e9f4d8b4083c93c77eb3b2babead1bd2f53bec Mon Sep 17 00:00:00 2001
+From: Aiden Hecker <heckeraiden@gmail.com>
+Date: Thu, 12 Nov 2026 17:56:47 -0800
+Subject: [PATCH v2 2/2] platform/x86/amd/hfi: Rank SMT siblings below primary
+ cores for ITMT packing
+To: Huang Rui <ray.huang@amd.com>,
+    Mario Limonciello <mario.limonciello@amd.com>,
+    Perry Yuan <perry.yuan@amd.com>,
+    K Prateek Nayak <kprateek.nayak@amd.com>,
+    Rafael J. Wysocki <rafael@kernel.org>,
+    Viresh Kumar <viresh.kumar@linaro.org>,
+    Hans de Goede <hansg@kernel.org>,
+    Ilpo Järvinen <ilpo.jarvinen@linux.intel.com>
+Cc: Ingo Molnar <mingo@redhat.com>,
+    Peter Zijlstra <peterz@infradead.org>,
+    linux-pm@vger.kernel.org,
+    platform-driver-x86@vger.kernel.org,
+    linux-kernel@vger.kernel.org
+
+On heterogeneous AMD processors (X86_FEATURE_AMD_HTR_CORES) with 2-way
+SMT enabled on both Zen 5 and Zen 5c cores, amd_set_hfi_ipcc_score()
+assigns identical ITMT priorities to primary threads and their SMT
+siblings.
+
+Scale secondary SMT sibling ITMT priorities slightly below their primary
+thread sibling (7/8 of the primary IPCC score) using
+topology_sibling_cpumask(). This preserves the SMT > dense-core advantage
+of classic Zen 5 SMT siblings ahead of Zen 5c cores while guiding
+SD_ASYM_PACKING to prefer idle physical cores first.
+
+Developed with coding assistance from Antigravity (Google DeepMind).
+
+Tested-by: Aiden Hecker <heckeraiden@gmail.com>
+Signed-off-by: Aiden Hecker <heckeraiden@gmail.com>
+---
+ drivers/platform/x86/amd/hfi/hfi.c | 18 +++++++++++++++++-
+ 1 file changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/platform/x86/amd/hfi/hfi.c b/drivers/platform/x86/amd/hfi/hfi.c
+index 86a7f4332..d7e35a2bf 100644
+--- a/drivers/platform/x86/amd/hfi/hfi.c
++++ b/drivers/platform/x86/amd/hfi/hfi.c
+@@ -12,6 +12,7 @@
+ 
+ #include <linux/acpi.h>
+ #include <linux/cpu.h>
++#include <linux/cpumask.h>
+ #include <linux/debugfs.h>
+ #include <linux/gfp.h>
+ #include <linux/init.h>
+@@ -261,11 +262,26 @@ static void amd_hfi_remove(struct platform_device *pdev)
+ 
+ static int amd_set_hfi_ipcc_score(struct amd_hfi_cpuinfo *hfi_cpuinfo, int cpu)
+ {
++	const struct cpumask *sib_mask;
++	int prio;
++
+ 	for (int i = 0; i < hfi_cpuinfo->nr_class; i++)
+ 		WRITE_ONCE(hfi_cpuinfo->ipcc_scores[i],
+ 			   hfi_cpuinfo->amd_hfi_classes[i].perf);
+ 
+-	sched_set_itmt_core_prio(hfi_cpuinfo->ipcc_scores[0], cpu);
++	/*
++	 * Rank secondary SMT siblings slightly below primary threads so
++	 * SD_ASYM_PACKING fills idle physical cores first while still keeping
++	 * classic Zen 5 SMT siblings ordered ahead of dense Zen 5c cores.
++	 */
++	prio = hfi_cpuinfo->ipcc_scores[0];
++	if (cpu_feature_enabled(X86_FEATURE_AMD_HTR_CORES)) {
++		sib_mask = topology_sibling_cpumask(cpu);
++		if (!cpumask_empty(sib_mask) && cpumask_first(sib_mask) != cpu)
++			prio = (prio * 7) / 8;
++	}
++
++	sched_set_itmt_core_prio(prio, cpu);
+ 
+ 	return 0;
+ }
+-- 
+2.56.1
+
