@@ -1,7 +1,19 @@
 From 0000000000000000000000000000000000000001 Mon Sep 17 00:00:00 2001
-From: Aiden <aiden@users.noreply.github.com>
+From: Aiden Hecker <heckeraiden@gmail.com>
 Date: Thu, 12 Nov 2026 20:08:00 -0500
 Subject: [PATCH 1/2] cpufreq: amd-pstate: Detect Zen 5 / Zen 5c hybrid topology via CPUID 0x80000026 and program cpu_scale
+To: Mario Limonciello <mario.limonciello@amd.com>,
+    Perry Yuan <perry.yuan@amd.com>,
+    Gautham R. Shenoy <gautham.shenoy@amd.com>,
+    Shyam Sundar S K <Shyam-sundar.S-k@amd.com>,
+    Rafael J. Wysocki <rafael@kernel.org>,
+    Ingo Molnar <mingo@redhat.com>,
+    Peter Zijlstra <peterz@infradead.org>,
+    Tejun Heo <tj@kernel.org>,
+    Linus Torvalds <torvalds@linux-foundation.org>
+Cc: linux-pm@vger.kernel.org,
+    platform-driver-x86@vger.kernel.org,
+    linux-kernel@vger.kernel.org
 
 On AMD Family 1Ah Model 60h (Ryzen AI 7 350 "Krackan Point"), physical cores
 alternate inside a single shared 16 MiB L3 CCX:
@@ -26,8 +38,8 @@ Fix this by:
    dense cores (664 primary, 512 SMT).
 
 Assisted-by: Antigravity (Google DeepMind)
-Tested-by: Aiden <aiden@users.noreply.github.com>
-Signed-off-by: Aiden <aiden@users.noreply.github.com>
+Tested-by: Aiden Hecker <heckeraiden@gmail.com>
+Signed-off-by: Aiden Hecker <heckeraiden@gmail.com>
 ---
  drivers/cpufreq/amd-pstate.c | 68 ++++++++++++++++++++++++++++++++++++
  1 file changed, 68 insertions(+)

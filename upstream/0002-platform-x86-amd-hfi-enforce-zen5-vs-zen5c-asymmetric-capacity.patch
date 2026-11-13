@@ -1,7 +1,19 @@
 From 0000000000000000000000000000000000000002 Mon Sep 17 00:00:00 2001
-From: Aiden <aiden@users.noreply.github.com>
+From: Aiden Hecker <heckeraiden@gmail.com>
 Date: Thu, 12 Nov 2026 20:08:00 -0500
 Subject: [PATCH 2/2] platform/x86/amd/hfi: Enforce Zen 5 vs Zen 5c asymmetric capacity and V/F knee ceiling on Krackan Point
+To: Mario Limonciello <mario.limonciello@amd.com>,
+    Perry Yuan <perry.yuan@amd.com>,
+    Gautham R. Shenoy <gautham.shenoy@amd.com>,
+    Shyam Sundar S K <Shyam-sundar.S-k@amd.com>,
+    Rafael J. Wysocki <rafael@kernel.org>,
+    Ingo Molnar <mingo@redhat.com>,
+    Peter Zijlstra <peterz@infradead.org>,
+    Tejun Heo <tj@kernel.org>,
+    Linus Torvalds <torvalds@linux-foundation.org>
+Cc: linux-pm@vger.kernel.org,
+    platform-driver-x86@vger.kernel.org,
+    linux-kernel@vger.kernel.org
 
 When `amd_hfi` (`AMDI0104:00`) initializes on AMD Family 1Ah Model 60h
 (Ryzen AI 7 350), the SMU populates 3 workload classes in shared memory.
@@ -19,8 +31,8 @@ module parameter `vf_knee_clamp` (default enabled on battery / balanced EPP)
 to right-size CPPC `des_perf` / `max_perf` below the cubic voltage wall.
 
 Assisted-by: Antigravity (Google DeepMind)
-Tested-by: Aiden <aiden@users.noreply.github.com>
-Signed-off-by: Aiden <aiden@users.noreply.github.com>
+Tested-by: Aiden Hecker <heckeraiden@gmail.com>
+Signed-off-by: Aiden Hecker <heckeraiden@gmail.com>
 ---
  drivers/platform/x86/amd/hfi/hfi.c | 42 ++++++++++++++++++++++++++++++
  1 file changed, 42 insertions(+)
