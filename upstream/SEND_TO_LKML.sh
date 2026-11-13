@@ -1,28 +1,28 @@
 #!/usr/bin/env bash
 # ============================================================================
-# SEND_TO_LKML.sh — Upstream Linux Kernel Submission Helper (Fedora 45)
+# SEND_TO_LKML.sh — One-Command Upstream Linux Kernel Submission Helper
+# Usage:
+#   ./upstream/SEND_TO_LKML.sh dry-run    # Safe preview (no emails sent)
+#   ./upstream/SEND_TO_LKML.sh self-test  # Send test copy ONLY to heckeraiden@gmail.com
+#   ./upstream/SEND_TO_LKML.sh send       # Send LIVE to LKML & Maintainers
 # ============================================================================
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MODE="${1:-dry-run}"
 
-if [[ $# -ge 2 ]]; then
-    REAL_NAME="$1"
-    REAL_EMAIL="$2"
-    sed -i "s/Aiden <aiden@users.noreply.github.com>/${REAL_NAME} <${REAL_EMAIL}>/g" "${DIR}"/*.patch
-    echo "[✓] Updated From:, Tested-by:, and Signed-off-by: to: ${REAL_NAME} <${REAL_EMAIL}>"
-fi
-
-if ! git send-email --version >/dev/null 2>&1; then
-    echo "[!] Note: 'git-email' is not installed yet on Fedora."
-    echo "    Install it with: sudo dnf install -y git-email"
-    exit 0
-fi
-
-echo "============================================================================"
-echo " Running Safe Dry-Run of LKML Patch Series ([PATCH 0/2] .. [PATCH 2/2])"
-echo "============================================================================"
-git send-email --dry-run "${DIR}"/*.patch
-echo ""
-echo "When ready to send live to LKML, run:"
-echo "  git send-email ${DIR}/*.patch"
+case "${MODE}" in
+  dry-run)
+    git send-email --dry-run --from="Aiden Hecker <heckeraiden@gmail.com>" --thread --no-chain-reply-to "${DIR}"/*.patch
+    ;;
+  self-test)
+    git send-email --from="Aiden Hecker <heckeraiden@gmail.com>" --suppress-cc=all --to="heckeraiden@gmail.com" --thread --no-chain-reply-to "${DIR}"/*.patch
+    ;;
+  send)
+    git send-email --from="Aiden Hecker <heckeraiden@gmail.com>" --thread --no-chain-reply-to "${DIR}"/*.patch
+    ;;
+  *)
+    echo "Usage: ./upstream/SEND_TO_LKML.sh [dry-run|self-test|send]"
+    exit 1
+    ;;
+esac
